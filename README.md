@@ -1,66 +1,94 @@
-# PromptHarbor
+# Prompt Release Management
 
-[![CI](https://github.com/MadanMohan0537/promptharbor/actions/workflows/ci.yml/badge.svg)](https://github.com/MadanMohan0537/promptharbor/actions/workflows/ci.yml)
+[![CI](https://github.com/MadanMohan0537/prompt-release-management/actions/workflows/ci.yml/badge.svg)](https://github.com/MadanMohan0537/prompt-release-management/actions/workflows/ci.yml)
 
-PromptHarbor is a dependency-free reference implementation for releasing prompt systems with the controls normally expected of software: semantic versions, configuration diffs, independent approval, evaluation evidence, deterministic canaries, monitoring, and automatic rollback.
+A local Python engine for changing prompts with a numeric version, a review by someone other than the author, evaluation evidence tied to a digest, a deterministic canary, and rollback when observed mean quality drops.
 
-> **Project Lab traceability:** Idea 12 — Prompt Change Management. PromptHarbor is the product name; the original title is retained only to prevent duplicate builds.
+The runtime uses only the Python standard library. The installable package, the import package, and the CLI are still named `promptharbor`. The demo report's `product` field is still `PromptHarbor`.
 
-## Why this exists
+## Problem and who it's for
 
-A prompt edit is rarely just text. Model parameters, retrieval settings, and tool schemas can change behavior just as much. Reviewing only the prompt creates stale evidence and unsafe releases. PromptHarbor versions these dependencies as one manifest and binds evaluation evidence to its cryptographic digest.
+A prompt change is rarely just text. Model parameters, retrieval settings, and tool schemas change behavior just as much. If reviewers look only at the prompt, evaluation evidence goes stale and unsafe releases get through. This is for teams running LLM features in production, and for the AI PMs and release owners who approve those changes.
 
-## Shipped MVP
+## Approach
 
-- Semantic-version registry with rationale and unified manifest diffs
-- Bundled prompt, model, retrieval, and tool-schema configuration
-- Explicit dependency scope, defaulting to all four behavior-changing inputs
-- Evaluation evidence bound to an exact SHA-256 manifest digest
-- Independent reviewer approval for customer-facing releases
-- Deterministic percentage canaries with stable user routing
-- Quality-drop monitor with automatic rollback and audit events
-- JSON release report and CSV audit export
-- Reproducible synthetic 10% canary; no API keys or paid services
-- 16 tests and a Python 3.11–3.13 CI matrix
+- Register one bundle of the prompt, model settings, retrieval configuration, and tool schemas, with a numeric `major.minor.patch` label and a non-empty rationale. `diff` prints a unified diff of two stored bundles. That diff is the full bundle, including dependency scope, not only the scoped document that is hashed.
+- Store evaluation evidence against the SHA-256 digest of the scoped manifest (canonical JSON). Changing a scoped field changes the digest, so later promotion rejects that evidence.
+- Reject approval by the author. Promotion requires at least one other approval, evidence whose digest still matches, a score at or above the minimum (default 0.8), and at least one case.
+- Send a percentage of SHA-256 hash buckets to the candidate. The same request key stays on the same version. When the caller passes samples to `observe`, a drop in mean quality greater than the allowed amount (default 0.05), with both cohorts present, clears the candidate and records `auto_rollback`.
+- The CLI can write a JSON release report and a CSV audit trail.
+
+## What exists today
+
+- A registry of numeric `major.minor.patch` labels. Empty rationales and duplicate labels are rejected. Labels are not ordered, and pre-release tags are rejected.
+- Evidence checked against the manifest digest. One test changes the prompt, model settings, retrieval settings, and tool schema; all four changes fail validation. A second test keeps the evidence valid when a field outside a narrower scope changes. The scope is a field on the bundle and defaults to all four inputs.
+- The author cannot approve their own release. Promotion is refused with no approval, a digest that does not match, or a score below the minimum.
+- The CLI demo registers `1.0.0` and `1.1.0`, attaches synthetic evidence and a non-author approval to `1.1.0` only, and sets `1.0.0` as stable by assignment. It routes 1,000 deterministic keys (`"0"` through `"999"`) with a 10% canary target. 106 of those keys go to the candidate. Candidate samples score 0.55 and stable samples score 0.92, so the recorded drop is 0.37 and the candidate is rolled back.
+- 16 unit tests in `tests/test_core.py`. [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs those tests and the CLI on Python 3.11, 3.12, and 3.13.
+
+## How success would be measured
+
+This repository does not contain measured production outcomes. The tests and the synthetic demo above exercise the engine locally. They are not measurements of the following.
+
+| Measure | Status |
+|---|---|
+| Behavior-changing edits that invalidate stale evidence | Not yet measured |
+| Regressions caught at canary stage instead of full rollout | Not yet measured |
+| Time from a quality drop to rollback | Not yet measured |
+| Releases shipped without independent approval | Not yet measured |
+
+## Limitations
+
+- A small in-memory policy engine, not a production control plane.
+- Quality metrics are supplied by the caller. The demo uses synthetic scores. Rollback compares cohort means and does not apply a sample floor or a confidence interval.
+- Storage is in memory, actors are strings, and one reviewer other than the author is enough to promote.
+- Version labels are checked for three numeric parts, then stored as strings. They are not ordered.
+- Hash routing keeps a key on one version. It is not a feature-flag service, and nothing here promotes a canary to stable.
+- Calling `observe` is what triggers rollback. There is no running monitor.
+
+See [docs/METHOD.md](docs/METHOD.md) and [docs/BACKLOG.md](docs/BACKLOG.md). Items marked planned or explored in the backlog are not in this tree.
 
 ## Quick start
 
+Requires Python 3.11 or newer. No API keys or paid services. On a machine where `python` is not on `PATH`, `python3` is the interpreter, including for the virtualenv step below. After activation, `python` in the virtualenv is that same interpreter. The workflow calls `python`.
+
 ```bash
-python -m venv .venv
+git clone https://github.com/MadanMohan0537/prompt-release-management.git
+cd prompt-release-management
+python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
 python -m unittest discover -s tests -v
 python -m promptharbor.cli --json report.json --csv audit.csv
 ```
 
-The demo registers a stable and candidate bundle, attaches synthetic evaluation evidence, records independent approval, sends 10% of 1,000 deterministic request keys to the candidate, detects its quality regression, and rolls it back.
+The last command prints the JSON report. `--json` and `--csv` also write `report.json` and `audit.csv`, which are listed in `.gitignore`. The installed console script has the same name: `promptharbor`.
 
-## Core workflow
+## Deployment
 
-1. Register a semantic version and release rationale.
-2. Evaluate the exact configuration manifest and attach its digest.
-3. Collect approval from someone other than the author.
-4. Promote to a bounded canary.
-5. Compare candidate and stable quality; roll back if the permitted drop is exceeded.
-6. Export the audit trail for review.
+Cloudflare Workers is the planned target. It is not configured in this repository, and this project is not deployed.
 
-## Configuration-bundle experiment
+There is no `wrangler.toml` and no Worker entry point. What is needed before a deploy:
 
-The test suite takes valid evidence and independently changes the prompt, model settings, retrieval configuration, and tool schema. All **4/4** scoped changes invalidate the evidence. A control test shows that an intentionally unscoped dependency does not invalidate it. This is useful for narrow edits, but the scope is itself visible and defaults to the safer full manifest.
+- `wrangler.toml`
+- a Worker entry point
+- Python Workers, or a JavaScript/TypeScript port
 
-## Design boundaries
+When that configuration exists, the deploy command is:
 
-This is a portfolio-scale policy engine, not a production control plane. Metrics are supplied by callers; the demo uses synthetic quality scores. Storage is in memory, authentication is represented by actor strings, approval policy is single-reviewer, and semantic versions are validated but not ordered. Deterministic routing demonstrates cohort stability but is not a full feature-flag service. See [Method and limitations](docs/METHOD.md) and [feature backlog](docs/BACKLOG.md).
+```bash
+npx wrangler deploy
+```
 
 ## Repository map
 
 ```text
-promptharbor/core.py   Registry, evidence, routing, rollback
-promptharbor/cli.py    Reproducible end-to-end simulation
-tests/                 Policy and behavior tests
-docs/                  Method, limitations, prioritized backlog
+promptharbor/core.py   registry, evidence, routing, rollback
+promptharbor/cli.py    reproducible end-to-end simulation
+tests/                 policy and behavior tests
+docs/                  method, limitations, backlog
 ```
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).
