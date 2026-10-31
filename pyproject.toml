@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "promptharbor"
-version = "0.1.0"
-description = "Versioned prompt releases with approvals, canaries, and rollback"
+version = "0.2.0"
+description = "Versioned prompt releases with evidence-bound, confidence-aware canaries"
 requires-python = ">=3.11"
 
 [project.scripts]
@@ -13,3 +13,4 @@ promptharbor = "promptharbor.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["promptharbor*"]
+

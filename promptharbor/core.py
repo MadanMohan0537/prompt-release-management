@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from difflib import unified_diff
 import hashlib
 import json
+import math
+from statistics import NormalDist, mean, variance
 from typing import Any
 
 ALL_DEPENDENCIES = ("prompt", "model", "retrieval", "tools")
@@ -48,6 +50,10 @@ class Sample:
     route_key: str
     version: str
     quality: float
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.quality) or not 0 <= self.quality <= 1:
+            raise ValueError("quality must be finite and between 0 and 1")
 
 @dataclass
 class Version:
@@ -94,12 +100,30 @@ class Registry:
         self.audit.append({"at": _now(), "event": event, "version": version, "actor": actor, **details})
 
 class ReleaseManager:
-    def __init__(self, registry: Registry, minimum_score: float = .8) -> None:
+    def __init__(
+        self,
+        registry: Registry,
+        minimum_score: float = .8,
+        minimum_samples: int = 30,
+        family_error_rate: float = .05,
+        maximum_looks: int = 20,
+    ) -> None:
+        if minimum_samples < 2:
+            raise ValueError("minimum_samples must be at least 2")
+        if not 0 < family_error_rate < 1:
+            raise ValueError("family_error_rate must be between 0 and 1")
+        if maximum_looks < 1:
+            raise ValueError("maximum_looks must be positive")
         self.registry = registry
         self.minimum_score = minimum_score
+        self.minimum_samples = minimum_samples
+        self.family_error_rate = family_error_rate
+        self.maximum_looks = maximum_looks
         self.stable: str | None = None
         self.candidate: str | None = None
         self.percent = 0
+        self.observation_looks = 0
+        self.last_observation: dict[str, Any] | None = None
 
     def promote(self, version: str, percent: int = 10) -> None:
         item = self.registry.versions[version]
@@ -110,6 +134,8 @@ class ReleaseManager:
         if not 1 <= percent <= 100:
             raise ValueError("canary percent must be 1..100")
         self.candidate, self.percent = version, percent
+        self.observation_looks = 0
+        self.last_observation = None
         self.registry._log("canary_started", version, "system", percent=percent)
 
     def route(self, key: str) -> str:
@@ -118,17 +144,69 @@ class ReleaseManager:
         bucket = int(hashlib.sha256(key.encode()).hexdigest()[:8], 16) % 100
         return self.candidate if self.candidate and bucket < self.percent else self.stable
 
-    def observe(self, samples: list[Sample], max_drop: float = .05) -> bool:
+    def observe_report(self, samples: list[Sample], max_drop: float = .05) -> dict[str, Any]:
+        if not 0 <= max_drop <= 1:
+            raise ValueError("max_drop must be between 0 and 1")
         if not self.candidate or not self.stable:
-            return False
+            report = {"decision": "inactive", "reason": "stable and candidate versions are required"}
+            self.last_observation = report
+            return report
         candidate = [s.quality for s in samples if s.version == self.candidate]
         stable = [s.quality for s in samples if s.version == self.stable]
-        if not candidate or not stable:
-            return False
-        drop = sum(stable)/len(stable) - sum(candidate)/len(candidate)
-        if drop > max_drop:
+        base = {
+            "stable_samples": len(stable),
+            "candidate_samples": len(candidate),
+            "minimum_samples": self.minimum_samples,
+            "max_drop": max_drop,
+        }
+        if len(candidate) < self.minimum_samples or len(stable) < self.minimum_samples:
+            report = {
+                **base,
+                "decision": "insufficient_data",
+                "additional_stable_needed": max(0, self.minimum_samples - len(stable)),
+                "additional_candidate_needed": max(0, self.minimum_samples - len(candidate)),
+            }
+            self.last_observation = report
+            return report
+        if self.observation_looks >= self.maximum_looks:
+            report = {**base, "decision": "manual_review", "reason": "maximum sequential looks exhausted"}
+            self.last_observation = report
+            return report
+
+        self.observation_looks += 1
+        drop = mean(stable) - mean(candidate)
+        standard_error = math.sqrt(variance(stable) / len(stable) + variance(candidate) / len(candidate))
+        alpha_per_look = self.family_error_rate / self.maximum_looks
+        critical_value = NormalDist().inv_cdf(1 - alpha_per_look)
+        lower_bound = drop - critical_value * standard_error
+        report = {
+            **base,
+            "decision": "rollback" if lower_bound > max_drop else "continue",
+            "look": self.observation_looks,
+            "maximum_looks": self.maximum_looks,
+            "family_error_rate": self.family_error_rate,
+            "alpha_per_look": round(alpha_per_look, 6),
+            "observed_drop": round(drop, 6),
+            "standard_error": round(standard_error, 6),
+            "one_sided_lower_bound": round(lower_bound, 6),
+        }
+        if report["decision"] == "rollback":
             failed = self.candidate
             self.candidate, self.percent = None, 0
-            self.registry._log("auto_rollback", failed, "monitor", quality_drop=round(drop, 4))
-            return True
-        return False
+            self.registry._log(
+                "auto_rollback",
+                failed,
+                "monitor",
+                quality_drop=round(drop, 4),
+                lower_bound=round(lower_bound, 4),
+                stable_samples=len(stable),
+                candidate_samples=len(candidate),
+                look=self.observation_looks,
+            )
+        self.last_observation = report
+        return report
+
+    def observe(self, samples: list[Sample], max_drop: float = .05) -> bool:
+        """Backward-compatible boolean wrapper around the evidence report."""
+        return self.observe_report(samples, max_drop)["decision"] == "rollback"
+

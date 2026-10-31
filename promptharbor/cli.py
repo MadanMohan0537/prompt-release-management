@@ -13,9 +13,10 @@ def demo() -> tuple[dict, Registry]:
     registry.approve("1.1.0", "risk-reviewer")
     manager = ReleaseManager(registry); manager.stable = "1.0.0"; manager.promote("1.1.0", 10)
     samples = [Sample(str(i), manager.route(str(i)), .55 if manager.route(str(i)) == "1.1.0" else .92) for i in range(1000)]
-    rolled_back = manager.observe(samples)
+    decision = manager.observe_report(samples)
+    rolled_back = decision["decision"] == "rollback"
     canary_count = sum(s.version == "1.1.0" for s in samples)
-    return {"product":"PromptHarbor","stable":"1.0.0","candidate":"1.1.0","requests":len(samples),"canary_requests":canary_count,"rolled_back":rolled_back,"diff":registry.diff("1.0.0","1.1.0")}, registry
+    return {"product":"PromptHarbor","stable":"1.0.0","candidate":"1.1.0","requests":len(samples),"canary_requests":canary_count,"rolled_back":rolled_back,"canary_decision":decision,"diff":registry.diff("1.0.0","1.1.0")}, registry
 
 def main() -> None:
     p=argparse.ArgumentParser(); p.add_argument("--json", type=Path); p.add_argument("--csv", type=Path); args=p.parse_args()
@@ -23,6 +24,7 @@ def main() -> None:
     if args.json: args.json.write_text(json.dumps(report, indent=2)+"\n")
     if args.csv:
         with args.csv.open("w", newline="") as f:
-            w=csv.DictWriter(f, fieldnames=["at","event","version","actor","digest","score","percent","quality_drop"], extrasaction="ignore"); w.writeheader(); w.writerows(registry.audit)
+            w=csv.DictWriter(f, fieldnames=["at","event","version","actor","digest","score","percent","quality_drop","lower_bound","stable_samples","candidate_samples","look"], extrasaction="ignore"); w.writeheader(); w.writerows(registry.audit)
     print(json.dumps(report, indent=2))
 if __name__ == "__main__": main()
+
